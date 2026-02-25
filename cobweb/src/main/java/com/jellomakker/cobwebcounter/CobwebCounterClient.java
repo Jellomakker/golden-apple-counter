@@ -22,6 +22,9 @@ import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -33,6 +36,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class CobwebCounterClient implements ClientModInitializer {
+    private static final Logger LOGGER = LoggerFactory.getLogger("cobwebcounter");
+    private static boolean loggedFirstRender = false;
     public static final String MOD_ID = "cobwebcounter";
 
     public static final Identifier COBWEB_FONT = Identifier.of(MOD_ID, "cobweb");
@@ -233,13 +238,19 @@ public class CobwebCounterClient implements ClientModInitializer {
         try {
             Class.forName("net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents");
             OldApiRenderer.register();
+            LOGGER.info("[CobwebCounter] Registered render event via OLD Fabric API (rendering.v1.WorldRenderEvents)");
             return;
-        } catch (Throwable ignored) {}
+        } catch (Throwable e) {
+            LOGGER.info("[CobwebCounter] Old API not available: {}", e.getMessage());
+        }
 
         // Try new Fabric API package (MC 1.21.11+ – ...rendering.v1.world.WorldRenderEvents)
         try {
             registerNewApiRenderEvent();
-        } catch (Throwable ignored) {}
+            LOGGER.info("[CobwebCounter] Registered render event via NEW Fabric API (rendering.v1.world.WorldRenderEvents)");
+        } catch (Throwable e) {
+            LOGGER.error("[CobwebCounter] FAILED to register render event via BOTH old and new API!", e);
+        }
     }
 
     /**
@@ -252,8 +263,10 @@ public class CobwebCounterClient implements ClientModInitializer {
                     .AFTER_ENTITIES.register(context -> {
                         try {
                             float tickDelta = context.tickCounter().getTickProgress(false);
-                            doRenderCounters(context.matrixStack(), tickDelta);
-                        } catch (Throwable ignored) {}
+                            doRenderCounters(context.matrixStack(), context.consumers(), tickDelta);
+                        } catch (Throwable e) {
+                            LOGGER.error("[CobwebCounter] OldApiRenderer render error", e);
+                        }
                     });
         }
     }
@@ -284,9 +297,16 @@ public class CobwebCounterClient implements ClientModInitializer {
                         };
                     }
                     if (args != null && args.length == 1) {
-                        MatrixStack matrices = extractMatrixStack(args[0]);
-                        if (matrices != null) {
-                            doRenderCounters(matrices, getTickDelta());
+                        try {
+                            MatrixStack matrices = extractMatrixStack(args[0]);
+                            VertexConsumerProvider consumers = extractConsumers(args[0]);
+                            if (matrices != null) {
+                                doRenderCounters(matrices, consumers, getTickDelta());
+                            } else {
+                                LOGGER.warn("[CobwebCounter] NewAPI: extractMatrixStack returned null");
+                            }
+                        } catch (Throwable e) {
+                            LOGGER.error("[CobwebCounter] NewAPI render error", e);
                         }
                     }
                     return null;
@@ -309,6 +329,18 @@ public class CobwebCounterClient implements ClientModInitializer {
                 if (result instanceof MatrixStack ms) return ms;
             } catch (Throwable ignored) {}
         }
+        LOGGER.warn("[CobwebCounter] Could not extract MatrixStack from context: {}", context.getClass().getName());
+        return null;
+    }
+
+    /** Try to pull a VertexConsumerProvider from a WorldRenderContext of any API version. */
+    private static VertexConsumerProvider extractConsumers(Object context) {
+        try {
+            Method m = context.getClass().getMethod("consumers");
+            Object result = m.invoke(context);
+            if (result instanceof VertexConsumerProvider vcp) return vcp;
+        } catch (Throwable ignored) {}
+        LOGGER.warn("[CobwebCounter] Could not extract consumers from context, will use own Immediate");
         return null;
     }
 
@@ -327,10 +359,14 @@ public class CobwebCounterClient implements ClientModInitializer {
             for (java.lang.reflect.Field f : Camera.class.getDeclaredFields()) {
                 if (Vec3d.class.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
-                    return (Vec3d) f.get(camera);
+                    Vec3d pos = (Vec3d) f.get(camera);
+                    return pos;
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable e) {
+            LOGGER.error("[CobwebCounter] Failed to read camera pos field", e);
+        }
+        LOGGER.warn("[CobwebCounter] getCameraPos: no Vec3d field found on Camera class");
         return null;
     }
 
@@ -350,7 +386,7 @@ public class CobwebCounterClient implements ClientModInitializer {
      * Rendered at height + 0.9 to sit ABOVE the golden apple counter (height + 0.6)
      * when both mods are installed together.
      */
-    private static void doRenderCounters(MatrixStack matrices, float tickDelta) {
+    private static void doRenderCounters(MatrixStack matrices, VertexConsumerProvider contextConsumers, float tickDelta) {
         try {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.world == null || client.player == null) return;
@@ -360,10 +396,22 @@ public class CobwebCounterClient implements ClientModInitializer {
 
             Camera camera = client.gameRenderer.getCamera();
             Vec3d cameraPos = getCameraPos(camera);
-            if (cameraPos == null) return;
+            if (cameraPos == null) {
+                LOGGER.warn("[CobwebCounter] cameraPos is null, skipping render");
+                return;
+            }
 
-            VertexConsumerProvider.Immediate immediate =
-                    client.getBufferBuilders().getEntityVertexConsumers();
+            // Use context consumers if available; otherwise fall back to own Immediate
+            boolean usingOwnImmediate = false;
+            VertexConsumerProvider consumers;
+            VertexConsumerProvider.Immediate ownImmediate = null;
+            if (contextConsumers != null) {
+                consumers = contextConsumers;
+            } else {
+                ownImmediate = client.getBufferBuilders().getEntityVertexConsumers();
+                consumers = ownImmediate;
+                usingOwnImmediate = true;
+            }
             TextRenderer textRenderer = client.textRenderer;
 
             boolean anyRendered = false;
@@ -396,18 +444,25 @@ public class CobwebCounterClient implements ClientModInitializer {
                 int bgColor = config.showBackground ? (int) (0.25f * 255.0f) << 24 : 0;
                 Matrix4f matrix = matrices.peek().getPositionMatrix();
 
-                textRenderer.draw(label, textX, 0, 0x20FFFFFF, false, matrix, immediate,
+                textRenderer.draw(label, textX, 0, 0x20FFFFFF, false, matrix, consumers,
                         TextRenderer.TextLayerType.SEE_THROUGH, bgColor, light);
-                textRenderer.draw(label, textX, 0, 0xFFFFFFFF, false, matrix, immediate,
+                textRenderer.draw(label, textX, 0, 0xFFFFFFFF, false, matrix, consumers,
                         TextRenderer.TextLayerType.NORMAL, 0, light);
 
                 matrices.pop();
                 anyRendered = true;
             }
 
-            if (anyRendered) {
-                immediate.draw();
+            if (anyRendered && usingOwnImmediate && ownImmediate != null) {
+                ownImmediate.draw();
             }
-        } catch (Throwable ignored) {}
+
+            if (!loggedFirstRender && anyRendered) {
+                LOGGER.info("[CobwebCounter] First render frame OK (usingOwnImmediate={})", usingOwnImmediate);
+                loggedFirstRender = true;
+            }
+        } catch (Throwable e) {
+            LOGGER.error("[CobwebCounter] doRenderCounters exception", e);
+        }
     }
 }
