@@ -12,8 +12,6 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -24,25 +22,16 @@ import java.util.UUID;
  * Hooks into EntityRenderer.render() to draw the cobweb counter
  * above each player. Rendered at height + 0.9 to sit ABOVE the
  * golden apple counter (height + 0.6) when both mods are installed.
+ * Calls queue.submitLabel() directly to bypass server name visibility.
  */
 @Mixin(EntityRenderer.class)
 public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
-
-    @Unique
-    private static final ThreadLocal<Boolean> cobwebCounter$rendering =
-            ThreadLocal.withInitial(() -> Boolean.FALSE);
-
-    @Shadow
-    protected abstract void renderLabelIfPresent(S state, MatrixStack matrices,
-                                                  OrderedRenderCommandQueue queue, CameraRenderState cameraState);
 
     @Inject(method = "render", at = @At("RETURN"))
     private void cobwebCounter$afterRender(S state, MatrixStack matrices,
                                             OrderedRenderCommandQueue queue,
                                             CameraRenderState cameraState,
                                             CallbackInfo ci) {
-        if (cobwebCounter$rendering.get()) return;
-
         if (!(state instanceof PlayerEntityRenderState playerState)) return;
 
         CobwebCounterConfig config = CobwebCounterConfig.get();
@@ -60,26 +49,22 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
         int count = CobwebCounterClient.getCount(uuid);
         if (count <= 0) return;
 
-        Vec3d originalNameLabelPos = state.nameLabelPos;
-        Text originalDisplayName = state.displayName;
-        boolean originalSneaking = state.sneaking;
+        Text counterText = CobwebCounterClient.buildCounterText(count);
+        Vec3d labelPos = new Vec3d(0, state.height + 0.9, 0);
 
-        try {
-            // Position at height + 0.9 (above golden apple counter's +0.6)
-            state.nameLabelPos = new Vec3d(0, state.height + 0.9, 0);
-            state.displayName = CobwebCounterClient.buildCounterText(count);
-
-            if (!config.showBackground) {
-                state.sneaking = true;
-            }
-
-            cobwebCounter$rendering.set(Boolean.TRUE);
-            renderLabelIfPresent(state, matrices, queue, cameraState);
-        } finally {
-            cobwebCounter$rendering.set(Boolean.FALSE);
-            state.nameLabelPos = originalNameLabelPos;
-            state.displayName = originalDisplayName;
-            state.sneaking = originalSneaking;
-        }
+        // Call submitLabel directly — bypasses PlayerEntityRenderer's override
+        // which may honour server team visibility settings that hide nametags.
+        matrices.push();
+        queue.submitLabel(
+                matrices,
+                labelPos,
+                0,                              // y pixel offset
+                counterText,
+                config.showBackground,          // show background rectangle
+                state.light,
+                state.squaredDistanceToCamera,
+                cameraState
+        );
+        matrices.pop();
     }
 }
