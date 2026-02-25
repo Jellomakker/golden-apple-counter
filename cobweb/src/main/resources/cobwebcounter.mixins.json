@@ -4,9 +4,10 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "ClientPlayNetworkHandlerMixin",
-    "ClientWorldMixin"
+    "ClientWorldMixin",
+    "EntityRendererMixin"
   ],
   "injectors": {
-    "defaultRequire": 0
+    "defaultRequire": 1
   }
 }
