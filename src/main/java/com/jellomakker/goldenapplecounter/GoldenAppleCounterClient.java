@@ -5,8 +5,6 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.option.KeyBinding;
@@ -27,6 +25,9 @@ import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -91,10 +92,10 @@ public class GoldenAppleCounterClient implements ClientModInitializer {
             ID_TO_UUID.clear();
         });
 
-        // Render counters above player heads using Fabric's stable rendering event.
-        // This avoids injecting into EntityRenderer.render() whose signature changes
-        // between MC versions (1.21.5 vs 1.21.11+).
-        WorldRenderEvents.AFTER_ENTITIES.register(GoldenAppleCounterClient::renderCounters);
+        // Render counters above player heads.
+        // The Fabric rendering API package moved in newer versions, so we try
+        // both the old and new locations to work on MC 1.21.5 through 1.21.11+.
+        registerRenderEvent();
     }
 
     /**
@@ -299,82 +300,160 @@ public class GoldenAppleCounterClient implements ClientModInitializer {
         ID_TO_UUID.clear();
     }
 
-    // ── Rendering via Fabric WorldRenderEvents (cross-version safe) ──────────
+    // ── Cross-version Fabric render event registration ──────────────────────
+
+    private static void registerRenderEvent() {
+        // Try old Fabric API package (MC 1.21.5 – ...rendering.v1.WorldRenderEvents)
+        try {
+            Class.forName("net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents");
+            OldApiRenderer.register();
+            return;
+        } catch (Throwable ignored) {}
+
+        // Try new Fabric API package (MC 1.21.11+ – ...rendering.v1.world.WorldRenderEvents)
+        try {
+            registerNewApiRenderEvent();
+        } catch (Throwable ignored) {}
+    }
 
     /**
-     * Render golden apple counters above tracked players.
-     * Uses Fabric's WorldRenderEvents.AFTER_ENTITIES which provides a stable
-     * API across MC versions, avoiding the EntityRenderer.render() signature
-     * changes in 1.21.11+.
+     * Old API path – this inner class is only loaded when the old-package
+     * WorldRenderEvents exists, preventing NoClassDefFoundError on 1.21.11+.
      */
-    private static void renderCounters(WorldRenderContext context) {
-        try {
-            renderCountersInternal(context);
-        } catch (Throwable ignored) {
-            // Gracefully handle any API incompatibility across MC versions
+    private static class OldApiRenderer {
+        static void register() {
+            net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents
+                    .AFTER_ENTITIES.register(context -> {
+                        try {
+                            float tickDelta = context.tickCounter().getTickProgress(false);
+                            doRenderCounters(context.matrixStack(), tickDelta);
+                        } catch (Throwable ignored) {}
+                    });
         }
     }
 
-    private static void renderCountersInternal(WorldRenderContext context) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null || client.player == null) return;
+    /**
+     * New API path – fully reflective so we never reference the new package
+     * at compile-time (we compile against 1.21.5 Fabric API).
+     */
+    private static void registerNewApiRenderEvent() throws Exception {
+        Class<?> eventsClass = Class.forName(
+                "net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents");
+        Field afterEntitiesField = eventsClass.getField("AFTER_ENTITIES");
+        Object event = afterEntitiesField.get(null);
 
-        GoldenAppleCounterConfig config = GoldenAppleCounterConfig.get();
-        if (!config.enabled || !config.showOnPlayerName) return;
+        Class<?> listenerInterface = Class.forName(
+                "net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents$AfterEntities");
 
-        Camera camera = context.camera();
-        Vec3d cameraPos = camera.getPos();
-        float tickDelta = context.tickCounter().getTickProgress(false);
+        Object proxy = Proxy.newProxyInstance(
+                listenerInterface.getClassLoader(),
+                new Class[]{listenerInterface},
+                (p, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return switch (method.getName()) {
+                            case "hashCode" -> System.identityHashCode(p);
+                            case "equals"   -> p == args[0];
+                            case "toString" -> "GoldenAppleCounterRenderProxy";
+                            default         -> null;
+                        };
+                    }
+                    if (args != null && args.length == 1) {
+                        MatrixStack matrices = extractMatrixStack(args[0]);
+                        if (matrices != null) {
+                            doRenderCounters(matrices, getTickDelta());
+                        }
+                    }
+                    return null;
+                });
 
-        VertexConsumerProvider.Immediate immediate =
-                client.getBufferBuilders().getEntityVertexConsumers();
-        MatrixStack matrices = context.matrixStack();
-        TextRenderer textRenderer = client.textRenderer;
+        for (Method m : event.getClass().getMethods()) {
+            if (m.getName().equals("register") && m.getParameterCount() == 1) {
+                m.invoke(event, proxy);
+                break;
+            }
+        }
+    }
 
-        boolean anyRendered = false;
+    /** Try to pull a MatrixStack from a WorldRenderContext of any API version. */
+    private static MatrixStack extractMatrixStack(Object context) {
+        for (String name : new String[]{"matrices", "matrixStack"}) {
+            try {
+                Method m = context.getClass().getMethod(name);
+                Object result = m.invoke(context);
+                if (result instanceof MatrixStack ms) return ms;
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
 
-        for (PlayerEntity player : client.world.getPlayers()) {
-            UUID uuid = player.getUuid();
+    /** Get tick delta from MinecraftClient, with a safe fallback. */
+    private static float getTickDelta() {
+        try {
+            return MinecraftClient.getInstance().getRenderTickCounter().getTickProgress(false);
+        } catch (Throwable e) {
+            return 1.0f;
+        }
+    }
 
-            if (!config.includeSelfDisplay && uuid.equals(client.player.getUuid())) {
-                continue;
+    // ── Shared rendering logic ───────────────────────────────────────────────
+
+    private static void doRenderCounters(MatrixStack matrices, float tickDelta) {
+        try {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.world == null || client.player == null) return;
+
+            GoldenAppleCounterConfig config = GoldenAppleCounterConfig.get();
+            if (!config.enabled || !config.showOnPlayerName) return;
+
+            Camera camera = client.gameRenderer.getCamera();
+            Vec3d cameraPos = camera.getPos();
+
+            VertexConsumerProvider.Immediate immediate =
+                    client.getBufferBuilders().getEntityVertexConsumers();
+            TextRenderer textRenderer = client.textRenderer;
+
+            boolean anyRendered = false;
+
+            for (PlayerEntity player : client.world.getPlayers()) {
+                UUID uuid = player.getUuid();
+
+                if (!config.includeSelfDisplay && uuid.equals(client.player.getUuid())) {
+                    continue;
+                }
+
+                int count = getCount(uuid);
+                if (count <= 0) continue;
+
+                Vec3d playerPos = player.getLerpedPos(tickDelta);
+                double x = playerPos.x - cameraPos.x;
+                double y = playerPos.y - cameraPos.y + player.getHeight() + 0.6;
+                double z = playerPos.z - cameraPos.z;
+
+                Text label = buildCounterText(count);
+
+                matrices.push();
+                matrices.translate(x, y, z);
+                matrices.multiply(camera.getRotation());
+                matrices.scale(-0.025f, -0.025f, 0.025f);
+
+                float textWidth = textRenderer.getWidth(label);
+                float textX = -textWidth / 2;
+                int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+                int bgColor = config.showBackground ? (int) (0.25f * 255.0f) << 24 : 0;
+                Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+                textRenderer.draw(label, textX, 0, 0x20FFFFFF, false, matrix, immediate,
+                        TextRenderer.TextLayerType.SEE_THROUGH, bgColor, light);
+                textRenderer.draw(label, textX, 0, 0xFFFFFFFF, false, matrix, immediate,
+                        TextRenderer.TextLayerType.NORMAL, 0, light);
+
+                matrices.pop();
+                anyRendered = true;
             }
 
-            int count = getCount(uuid);
-            if (count <= 0) continue;
-
-            // Interpolated position relative to camera
-            Vec3d playerPos = player.getLerpedPos(tickDelta);
-            double x = playerPos.x - cameraPos.x;
-            double y = playerPos.y - cameraPos.y + player.getHeight() + 0.6;
-            double z = playerPos.z - cameraPos.z;
-
-            Text label = buildCounterText(count);
-
-            matrices.push();
-            matrices.translate(x, y, z);
-            matrices.multiply(camera.getRotation());
-            matrices.scale(-0.025f, -0.025f, 0.025f);
-
-            float textWidth = textRenderer.getWidth(label);
-            float textX = -textWidth / 2;
-            int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
-            int bgColor = config.showBackground ? (int) (0.25f * 255.0f) << 24 : 0;
-            Matrix4f matrix = matrices.peek().getPositionMatrix();
-
-            // See-through layer (visible behind blocks, semi-transparent)
-            textRenderer.draw(label, textX, 0, 0x20FFFFFF, false, matrix, immediate,
-                    TextRenderer.TextLayerType.SEE_THROUGH, bgColor, light);
-            // Normal opaque layer
-            textRenderer.draw(label, textX, 0, 0xFFFFFFFF, false, matrix, immediate,
-                    TextRenderer.TextLayerType.NORMAL, 0, light);
-
-            matrices.pop();
-            anyRendered = true;
-        }
-
-        if (anyRendered) {
-            immediate.draw();
-        }
+            if (anyRendered) {
+                immediate.draw();
+            }
+        } catch (Throwable ignored) {}
     }
 }
