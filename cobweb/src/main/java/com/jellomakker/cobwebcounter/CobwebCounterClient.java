@@ -5,15 +5,23 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.Style;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Constructor;
@@ -66,6 +74,11 @@ public class CobwebCounterClient implements ClientModInitializer {
             COUNTS.clear();
             ID_TO_UUID.clear();
         });
+
+        // Render counters above player heads using Fabric's stable rendering event.
+        // This avoids injecting into EntityRenderer.render() whose signature changes
+        // between MC versions (1.21.5 vs 1.21.11+).
+        WorldRenderEvents.AFTER_ENTITIES.register(CobwebCounterClient::renderCounters);
     }
 
     /**
@@ -210,5 +223,86 @@ public class CobwebCounterClient implements ClientModInitializer {
         COUNTS.clear();
         ID_TO_UUID.clear();
         COUNTED_THIS_TICK.clear();
+    }
+
+    // ── Rendering via Fabric WorldRenderEvents (cross-version safe) ──────────
+
+    /**
+     * Render cobweb counters above tracked players.
+     * Uses Fabric's WorldRenderEvents.AFTER_ENTITIES which provides a stable
+     * API across MC versions, avoiding the EntityRenderer.render() signature
+     * changes in 1.21.11+.
+     * Rendered at height + 0.9 to sit ABOVE the golden apple counter (height + 0.6)
+     * when both mods are installed together.
+     */
+    private static void renderCounters(WorldRenderContext context) {
+        try {
+            renderCountersInternal(context);
+        } catch (Throwable ignored) {
+            // Gracefully handle any API incompatibility across MC versions
+        }
+    }
+
+    private static void renderCountersInternal(WorldRenderContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null || client.player == null) return;
+
+        CobwebCounterConfig config = CobwebCounterConfig.get();
+        if (!config.enabled || !config.showOnPlayerName) return;
+
+        Camera camera = context.camera();
+        Vec3d cameraPos = camera.getPos();
+        float tickDelta = context.tickCounter().getTickProgress(false);
+
+        VertexConsumerProvider.Immediate immediate =
+                client.getBufferBuilders().getEntityVertexConsumers();
+        MatrixStack matrices = context.matrixStack();
+        TextRenderer textRenderer = client.textRenderer;
+
+        boolean anyRendered = false;
+
+        for (PlayerEntity player : client.world.getPlayers()) {
+            UUID uuid = player.getUuid();
+
+            if (!config.includeSelfDisplay && uuid.equals(client.player.getUuid())) {
+                continue;
+            }
+
+            int count = getCount(uuid);
+            if (count <= 0) continue;
+
+            // Interpolated position relative to camera
+            Vec3d playerPos = player.getLerpedPos(tickDelta);
+            double x = playerPos.x - cameraPos.x;
+            double y = playerPos.y - cameraPos.y + player.getHeight() + 0.9;
+            double z = playerPos.z - cameraPos.z;
+
+            Text label = buildCounterText(count);
+
+            matrices.push();
+            matrices.translate(x, y, z);
+            matrices.multiply(camera.getRotation());
+            matrices.scale(-0.025f, -0.025f, 0.025f);
+
+            float textWidth = textRenderer.getWidth(label);
+            float textX = -textWidth / 2;
+            int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+            int bgColor = config.showBackground ? (int) (0.25f * 255.0f) << 24 : 0;
+            Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+            // See-through layer (visible behind blocks, semi-transparent)
+            textRenderer.draw(label, textX, 0, 0x20FFFFFF, false, matrix, immediate,
+                    TextRenderer.TextLayerType.SEE_THROUGH, bgColor, light);
+            // Normal opaque layer
+            textRenderer.draw(label, textX, 0, 0xFFFFFFFF, false, matrix, immediate,
+                    TextRenderer.TextLayerType.NORMAL, 0, light);
+
+            matrices.pop();
+            anyRendered = true;
+        }
+
+        if (anyRendered) {
+            immediate.draw();
+        }
     }
 }
