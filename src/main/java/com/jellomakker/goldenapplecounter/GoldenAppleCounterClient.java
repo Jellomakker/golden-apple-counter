@@ -11,7 +11,6 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.text.Style;
-import net.minecraft.text.StyleSpriteSource;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
@@ -65,7 +64,7 @@ public class GoldenAppleCounterClient implements ClientModInitializer {
         resetKeybind = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.goldenapplecounter.reset",
                 GLFW.GLFW_KEY_UNKNOWN,
-                KeyBinding.Category.create(Identifier.of(MOD_ID, "category"))
+                "category.goldenapplecounter"
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
@@ -201,7 +200,7 @@ public class GoldenAppleCounterClient implements ClientModInitializer {
     /** Build the counter text with a real golden apple icon from our custom font. */
     public static Text buildCounterText(int count) {
         Text appleIcon = Text.literal(GOLDEN_APPLE_ICON)
-                .setStyle(Style.EMPTY.withFont(new StyleSpriteSource.Font(GOLDEN_APPLE_FONT)));
+                .setStyle(Style.EMPTY.withFont(GOLDEN_APPLE_FONT));
         return Text.literal(String.valueOf(count)).append(Text.literal(" ")).append(appleIcon);
     }
 

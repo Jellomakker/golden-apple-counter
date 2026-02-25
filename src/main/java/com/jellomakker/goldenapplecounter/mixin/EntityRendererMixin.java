@@ -3,11 +3,10 @@ package com.jellomakker.goldenapplecounter.mixin;
 import com.jellomakker.goldenapplecounter.GoldenAppleCounterClient;
 import com.jellomakker.goldenapplecounter.config.GoldenAppleCounterConfig;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.command.OrderedRenderCommandQueue;
+import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.entity.EntityRenderer;
 import net.minecraft.client.render.entity.state.EntityRenderState;
 import net.minecraft.client.render.entity.state.PlayerEntityRenderState;
-import net.minecraft.client.render.state.CameraRenderState;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
@@ -37,13 +36,13 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
             ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     @Shadow
-    protected abstract void renderLabelIfPresent(S state, MatrixStack matrices,
-                                                  OrderedRenderCommandQueue queue, CameraRenderState cameraState);
+    protected abstract void renderLabelIfPresent(S state, Text text, MatrixStack matrices,
+                                                  VertexConsumerProvider vertexConsumers, int light);
 
     @Inject(method = "render", at = @At("RETURN"))
     private void goldenAppleCounter$afterRender(S state, MatrixStack matrices,
-                                                 OrderedRenderCommandQueue queue,
-                                                 CameraRenderState cameraState,
+                                                 VertexConsumerProvider vertexConsumers,
+                                                 int light,
                                                  CallbackInfo ci) {
         // Prevent recursion
         if (goldenAppleCounter$rendering.get()) return;
@@ -70,26 +69,25 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
 
         // Save original state
         Vec3d originalNameLabelPos = state.nameLabelPos;
-        Text originalDisplayName = state.displayName;
         boolean originalSneaking = state.sneaking;
 
         try {
             // Position label above the player's head (height + 0.6)
             state.nameLabelPos = new Vec3d(0, state.height + 0.6, 0);
-            state.displayName = GoldenAppleCounterClient.buildCounterText(count);
 
             // If no background desired, set sneaking=true (engine skips bg for sneaking)
             if (!config.showBackground) {
                 state.sneaking = true;
             }
 
+            Text counterText = GoldenAppleCounterClient.buildCounterText(count);
+
             goldenAppleCounter$rendering.set(Boolean.TRUE);
-            renderLabelIfPresent(state, matrices, queue, cameraState);
+            renderLabelIfPresent(state, counterText, matrices, vertexConsumers, light);
         } finally {
             goldenAppleCounter$rendering.set(Boolean.FALSE);
             // Restore original state
             state.nameLabelPos = originalNameLabelPos;
-            state.displayName = originalDisplayName;
             state.sneaking = originalSneaking;
         }
     }
