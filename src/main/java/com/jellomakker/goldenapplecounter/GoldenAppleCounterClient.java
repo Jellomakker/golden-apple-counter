@@ -388,6 +388,7 @@ public class GoldenAppleCounterClient implements ClientModInitializer {
 
         for (Method m : event.getClass().getMethods()) {
             if (m.getName().equals("register") && m.getParameterCount() == 1) {
+                m.setAccessible(true);
                 m.invoke(event, proxy);
                 break;
             }
