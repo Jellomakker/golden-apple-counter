@@ -312,6 +312,28 @@ public class CobwebCounterClient implements ClientModInitializer {
         return null;
     }
 
+    /**
+     * Get camera position, working across MC versions.
+     * Camera.getPos() was removed in 1.21.11 but the pos field still exists.
+     */
+    private static Vec3d getCameraPos(Camera camera) {
+        // Try the method first (exists in 1.21.5)
+        try {
+            Method m = Camera.class.getMethod("getPos");
+            return (Vec3d) m.invoke(camera);
+        } catch (Throwable ignored) {}
+        // Fall back to reading the pos field directly (1.21.11+)
+        try {
+            for (java.lang.reflect.Field f : Camera.class.getDeclaredFields()) {
+                if (Vec3d.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    return (Vec3d) f.get(camera);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
     /** Get tick delta from MinecraftClient, with a safe fallback. */
     private static float getTickDelta() {
         try {
@@ -337,7 +359,8 @@ public class CobwebCounterClient implements ClientModInitializer {
             if (!config.enabled || !config.showOnPlayerName) return;
 
             Camera camera = client.gameRenderer.getCamera();
-            Vec3d cameraPos = camera.getPos();
+            Vec3d cameraPos = getCameraPos(camera);
+            if (cameraPos == null) return;
 
             VertexConsumerProvider.Immediate immediate =
                     client.getBufferBuilders().getEntityVertexConsumers();
