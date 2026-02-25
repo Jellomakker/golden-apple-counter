@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "com.jellomakker.cobwebcounter.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "ClientPlayNetworkHandlerMixin",
+    "ClientWorldMixin",
+    "EntityRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
