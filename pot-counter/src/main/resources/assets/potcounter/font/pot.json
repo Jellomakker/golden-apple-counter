@@ -1,0 +1,11 @@
+{
+  "providers": [
+    {
+      "type": "bitmap",
+      "file": "minecraft:item/splash_potion.png",
+      "height": 8,
+      "ascent": 7,
+      "chars": ["\uE200"]
+    }
+  ]
+}
