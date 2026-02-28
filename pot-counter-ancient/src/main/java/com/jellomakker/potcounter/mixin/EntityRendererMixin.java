@@ -5,9 +5,9 @@ import com.jellomakker.potcounter.config.PotCounterConfig;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.entity.LivingEntityRenderer;
+import net.minecraft.client.render.entity.EntityRenderer;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.Text;
 import org.joml.Matrix4f;
@@ -16,12 +16,15 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(LivingEntityRenderer.class)
+/**
+ * Targets EntityRenderer.render() which is called via super from LivingEntityRenderer.
+ * In MC 1.21-1.21.4, render takes (Entity, yaw, tickDelta, MatrixStack, VCP, light).
+ */
+@Mixin(EntityRenderer.class)
 public abstract class EntityRendererMixin {
 
-    @Inject(method = "render(Lnet/minecraft/entity/LivingEntity;FFLnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumerProvider;I)V",
-            at = @At("HEAD"))
-    private void onRender(LivingEntity entity, float yaw, float tickDelta,
+    @Inject(method = "render", at = @At("HEAD"))
+    private void onRender(Entity entity, float yaw, float tickDelta,
                           MatrixStack matrices, VertexConsumerProvider vertexConsumers,
                           int light, CallbackInfo ci) {
         if (!(entity instanceof PlayerEntity player)) return;
