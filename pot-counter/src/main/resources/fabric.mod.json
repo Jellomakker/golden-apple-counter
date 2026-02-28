@@ -8,7 +8,7 @@
     "Jello"
   ],
   "contact": {},
-  "license": "All-Rights-Reserved",
+  "license": "MIT",
   "icon": "assets/potcounter/icon.png",
   "environment": "client",
   "entrypoints": {
