@@ -17,7 +17,7 @@ public class PotCounterConfig {
 
     public boolean enabled = true;
     public boolean showOnPlayerName = true;
-    public boolean includeSelfDisplay = false;
+    public boolean includeSelfDisplay = true;
     public boolean showBackground = true;
 
     public static PotCounterConfig get() {

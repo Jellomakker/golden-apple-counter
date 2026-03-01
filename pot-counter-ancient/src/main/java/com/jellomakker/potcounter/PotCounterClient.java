@@ -71,26 +71,10 @@ public class PotCounterClient implements ClientModInitializer {
             active.add(player.getUuid());
         }
 
-        if (config.enabled) {
-            for (Entity entity : client.world.getEntities()) {
-                if (entity instanceof PotionEntity potionEntity) {
-                    int entityId = potionEntity.getId();
-                    if (!COUNTED_POTIONS.add(entityId)) continue;
-                    if (!isInstantHealthTwo(potionEntity)) continue;
-                    attributePotionThrow(client, potionEntity, config);
-                }
-            }
-        }
-
-        COUNTED_POTIONS.removeIf(id -> {
-            Entity e = client.world.getEntityById(id);
-            return e == null || !e.isAlive();
-        });
-
         COUNTS.keySet().retainAll(active);
     }
 
-    private boolean isInstantHealthTwo(PotionEntity potionEntity) {
+    private static boolean isInstantHealthTwo(PotionEntity potionEntity) {
         try {
             var stack = potionEntity.getStack();
             if (stack == null || stack.isEmpty()) return false;
@@ -118,7 +102,25 @@ public class PotCounterClient implements ClientModInitializer {
         return false;
     }
 
-    private void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
+    /**
+     * Called from ClientWorldMixin when a potion entity spawns in the client world.
+     */
+    public static void onPotionSpawned(PotionEntity potionEntity) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null) return;
+
+        PotCounterConfig config = PotCounterConfig.get();
+        if (!config.enabled) return;
+
+        int entityId = potionEntity.getId();
+        if (!COUNTED_POTIONS.add(entityId)) return;
+
+        if (!isInstantHealthTwo(potionEntity)) return;
+
+        attributePotionThrow(client, potionEntity, config);
+    }
+
+    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
         Vec3d potionPos = potionEntity.getPos();
         double closestDist = 20.0;
         PlayerEntity closest = null;

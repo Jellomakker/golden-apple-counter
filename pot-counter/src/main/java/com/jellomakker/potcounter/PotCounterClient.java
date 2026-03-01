@@ -85,35 +85,11 @@ public class PotCounterClient implements ClientModInitializer {
             ID_TO_UUID.put(player.getId(), uuid);
         }
 
-        // Scan for new splash potion entities
-        if (config.enabled) {
-            for (Entity entity : client.world.getEntities()) {
-                if (entity instanceof PotionEntity potionEntity) {
-                    int entityId = potionEntity.getId();
-
-                    // Skip already counted
-                    if (!COUNTED_POTIONS.add(entityId)) continue;
-
-                    // Check if it's an Instant Health II potion
-                    if (!isInstantHealthTwo(potionEntity)) continue;
-
-                    // Attribute to nearest player
-                    attributePotionThrow(client, potionEntity, config);
-                }
-            }
-        }
-
-        // Cleanup: remove counted potion IDs for entities that no longer exist
-        COUNTED_POTIONS.removeIf(id -> {
-            Entity e = client.world.getEntityById(id);
-            return e == null || !e.isAlive();
-        });
-
         COUNTS.keySet().retainAll(active);
         ID_TO_UUID.values().retainAll(active);
     }
 
-    private boolean isInstantHealthTwo(PotionEntity potionEntity) {
+    private static boolean isInstantHealthTwo(PotionEntity potionEntity) {
         try {
             var stack = potionEntity.getStack();
             if (stack == null || stack.isEmpty()) return false;
@@ -146,7 +122,27 @@ public class PotCounterClient implements ClientModInitializer {
         return false;
     }
 
-    private void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
+    /**
+     * Called from ClientWorldMixin when a potion entity spawns in the client world.
+     * This is far more reliable than tick-scanning because splash potions only
+     * live for 1-3 ticks and can despawn between tick callbacks.
+     */
+    public static void onPotionSpawned(PotionEntity potionEntity) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null) return;
+
+        PotCounterConfig config = PotCounterConfig.get();
+        if (!config.enabled) return;
+
+        int entityId = potionEntity.getId();
+        if (!COUNTED_POTIONS.add(entityId)) return;
+
+        if (!isInstantHealthTwo(potionEntity)) return;
+
+        attributePotionThrow(client, potionEntity, config);
+    }
+
+    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
         Vec3d potionPos = potionEntity.getSyncedPos();
         double closestDist = 20.0; // Larger range since potions travel
         PlayerEntity closest = null;
