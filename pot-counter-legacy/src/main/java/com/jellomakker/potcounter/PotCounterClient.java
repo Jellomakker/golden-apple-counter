@@ -126,7 +126,7 @@ public class PotCounterClient implements ClientModInitializer {
                     }
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) { LOGGER.error("[PotCounter] detection error: {}", t.toString()); }
         return false;
     }
 
@@ -150,6 +150,7 @@ public class PotCounterClient implements ClientModInitializer {
                 && uuid.equals(client.player.getUuid())) {
             return;
         }
+        LOGGER.info("[PotCounter] pot attributed to {}", uuid);
         COUNTS.merge(uuid, 1, Integer::sum);
     }
 
