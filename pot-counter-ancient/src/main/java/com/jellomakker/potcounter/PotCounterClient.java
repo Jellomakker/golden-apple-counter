@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
 
 public class PotCounterClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("potcounter");
@@ -33,6 +34,12 @@ public class PotCounterClient implements ClientModInitializer {
 
     private static final Map<UUID, Integer> COUNTS = new ConcurrentHashMap<>();
     private static final Set<Integer> COUNTED_POTIONS = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Potions whose spawn we detected via ClientWorldMixin but whose item data
+     * hasn't been synced yet.  We check them on the next tick.
+     */
+    private static final List<PotionEntity> PENDING_POTIONS = Collections.synchronizedList(new ArrayList<>());
 
     private static KeyBinding resetKeybind;
 
@@ -65,6 +72,21 @@ public class PotCounterClient implements ClientModInitializer {
         }
 
         PotCounterConfig config = PotCounterConfig.get();
+
+        // Process deferred potion checks – item data is now synced
+        if (!PENDING_POTIONS.isEmpty()) {
+            List<PotionEntity> snapshot;
+            synchronized (PENDING_POTIONS) {
+                snapshot = new ArrayList<>(PENDING_POTIONS);
+                PENDING_POTIONS.clear();
+            }
+            for (PotionEntity pending : snapshot) {
+                int eid = pending.getId();
+                if (!COUNTED_POTIONS.add(eid)) continue;
+                if (!isInstantHealthTwo(pending)) continue;
+                attributePotionThrow(client, pending, config);
+            }
+        }
 
         Set<UUID> active = new HashSet<>();
         for (PlayerEntity player : client.world.getPlayers()) {
@@ -104,20 +126,10 @@ public class PotCounterClient implements ClientModInitializer {
 
     /**
      * Called from ClientWorldMixin when a potion entity spawns in the client world.
+     * We queue it for next-tick processing because the item data hasn't been synced yet.
      */
     public static void onPotionSpawned(PotionEntity potionEntity) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null) return;
-
-        PotCounterConfig config = PotCounterConfig.get();
-        if (!config.enabled) return;
-
-        int entityId = potionEntity.getId();
-        if (!COUNTED_POTIONS.add(entityId)) return;
-
-        if (!isInstantHealthTwo(potionEntity)) return;
-
-        attributePotionThrow(client, potionEntity, config);
+        PENDING_POTIONS.add(potionEntity);
     }
 
     private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
@@ -156,5 +168,6 @@ public class PotCounterClient implements ClientModInitializer {
     public static void clearAll() {
         COUNTS.clear();
         COUNTED_POTIONS.clear();
+        PENDING_POTIONS.clear();
     }
 }
