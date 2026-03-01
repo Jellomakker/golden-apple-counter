@@ -23,7 +23,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.Collections;
 
 public class PotCounterClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("potcounter");
@@ -32,25 +31,37 @@ public class PotCounterClient implements ClientModInitializer {
     public static final Identifier POT_FONT = Identifier.of(MOD_ID, "pot");
     public static final String POT_ICON = "\uE200";
 
+    /** Maximum ticks to retry reading a potion’s item data before giving up. */
+    private static final int MAX_RETRY_TICKS = 20;
+
     private static final Map<UUID, Integer> COUNTS = new ConcurrentHashMap<>();
 
     /** Entity network ID → UUID, populated each tick for the renderer mixin. */
     private static final Map<Integer, UUID> ID_TO_UUID = new ConcurrentHashMap<>();
 
-    /**
-     * Track potion entity IDs we have already counted so we don't
-     * double-count a potion that exists for multiple ticks.
-     */
-    private static final Set<Integer> COUNTED_POTIONS = ConcurrentHashMap.newKeySet();
+    /** Potion entity IDs that have been definitively processed (counted or rejected). */
+    private static final Set<Integer> PROCESSED_POTIONS = ConcurrentHashMap.newKeySet();
 
     /**
-     * Potions whose spawn we detected via ClientWorldMixin but whose item data
-     * hasn't been synced yet.  We check them on the next tick, when the tracker
-     * update packet has been processed and getStack() returns the real contents.
+     * Potions awaiting identification. The item data may not be synced yet when
+     * ClientWorld.addEntity() fires, so we retry each tick until the data is
+     * available or we exceed MAX_RETRY_TICKS.
      */
-    private static final List<PotionEntity> PENDING_POTIONS = Collections.synchronizedList(new ArrayList<>());
+    private static final Map<Integer, PendingPotion> PENDING = new ConcurrentHashMap<>();
 
     private static KeyBinding resetKeybind;
+
+    private static final class PendingPotion {
+        final PotionEntity entity;
+        final Vec3d spawnPos;
+        int ticksWaited;
+
+        PendingPotion(PotionEntity entity) {
+            this.entity = entity;
+            this.spawnPos = entity.getPos();
+            this.ticksWaited = 0;
+        }
+    }
 
     @Override
     public void onInitializeClient() {
@@ -66,7 +77,8 @@ public class PotCounterClient implements ClientModInitializer {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             COUNTS.clear();
             ID_TO_UUID.clear();
-            COUNTED_POTIONS.clear();
+            PROCESSED_POTIONS.clear();
+            PENDING.clear();
         });
 
         LOGGER.info("[PotCounter] Initialized (rendering via EntityRendererMixin)");
@@ -75,7 +87,6 @@ public class PotCounterClient implements ClientModInitializer {
     private void onTick(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Check reset keybind
         if (resetKeybind != null) {
             while (resetKeybind.wasPressed()) {
                 clearAll();
@@ -84,18 +95,45 @@ public class PotCounterClient implements ClientModInitializer {
 
         PotCounterConfig config = PotCounterConfig.get();
 
-        // Process deferred potion checks – item data is now synced
-        if (!PENDING_POTIONS.isEmpty()) {
-            List<PotionEntity> snapshot;
-            synchronized (PENDING_POTIONS) {
-                snapshot = new ArrayList<>(PENDING_POTIONS);
-                PENDING_POTIONS.clear();
+        // --- Process pending potions (retry until data available) ---
+        if (!PENDING.isEmpty()) {
+            Iterator<Map.Entry<Integer, PendingPotion>> it = PENDING.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Integer, PendingPotion> entry = it.next();
+                PendingPotion pp = entry.getValue();
+                pp.ticksWaited++;
+
+                // Try to identify the potion
+                int result = checkPotion(pp.entity);
+                if (result == 1) {
+                    // Confirmed Instant Health II
+                    PROCESSED_POTIONS.add(entry.getKey());
+                    it.remove();
+                    attributePotionThrow(client, pp.entity, pp.spawnPos, config);
+                } else if (result == -1 || pp.ticksWaited >= MAX_RETRY_TICKS) {
+                    // Definitively not a health pot, or timed out
+                    PROCESSED_POTIONS.add(entry.getKey());
+                    it.remove();
+                }
+                // result == 0 means data not available yet, keep retrying
             }
-            for (PotionEntity pending : snapshot) {
-                int eid = pending.getId();
-                if (!COUNTED_POTIONS.add(eid)) continue;
-                if (!isInstantHealthTwo(pending)) continue;
-                attributePotionThrow(client, pending, config);
+        }
+
+        // --- Also scan world for any PotionEntity we may have missed ---
+        for (Entity entity : client.world.getEntities()) {
+            if (!(entity instanceof PotionEntity potionEntity)) continue;
+            int eid = potionEntity.getId();
+            if (PROCESSED_POTIONS.contains(eid) || PENDING.containsKey(eid)) continue;
+
+            int result = checkPotion(potionEntity);
+            if (result == 1) {
+                PROCESSED_POTIONS.add(eid);
+                attributePotionThrow(client, potionEntity, potionEntity.getPos(), config);
+            } else if (result == 0) {
+                // Data not ready – add to pending for retry
+                PENDING.put(eid, new PendingPotion(potionEntity));
+            } else {
+                PROCESSED_POTIONS.add(eid);
             }
         }
 
@@ -111,51 +149,55 @@ public class PotCounterClient implements ClientModInitializer {
         ID_TO_UUID.values().retainAll(active);
     }
 
-    private static boolean isInstantHealthTwo(PotionEntity potionEntity) {
+    /**
+     * Check whether a PotionEntity is an Instant Health II splash potion.
+     * @return 1 = yes, -1 = no (definitively not), 0 = data not available yet
+     */
+    private static int checkPotion(PotionEntity potionEntity) {
         try {
             var stack = potionEntity.getStack();
-            if (stack == null || stack.isEmpty()) return false;
+            if (stack == null || stack.isEmpty()) return 0; // data not synced yet
 
             PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
-            if (contents == null) return false;
+            if (contents == null) return -1; // has item but no potion data
 
-            // Check if potion matches STRONG_HEALING (Instant Health II)
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
-                    return true;
+                    return 1;
                 }
             }
 
-            // Also check the base potion entry
             if (contents.potion().isPresent()) {
                 var potionEntry = contents.potion().get();
                 for (var effect : potionEntry.value().getEffects()) {
                     if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                             && effect.getAmplifier() >= 1) {
-                        return true;
+                        return 1;
                     }
                 }
             }
+
+            return -1; // has potion data but not Instant Health II
         } catch (Throwable ignored) {
-            // Cross-version safety
+            return 0; // treat errors as "data not ready"
         }
-        return false;
     }
 
     /**
      * Called from ClientWorldMixin when a potion entity spawns in the client world.
-     * We do NOT check the potion type here because the item data (potion contents)
-     * hasn't been synced yet – it arrives in a later tracker update packet.
-     * Instead we queue the entity for checking on the next client tick.
+     * We queue it for processing because the item data (potion contents) may not
+     * have been synced yet at this point.
      */
     public static void onPotionSpawned(PotionEntity potionEntity) {
-        PENDING_POTIONS.add(potionEntity);
+        int eid = potionEntity.getId();
+        if (PROCESSED_POTIONS.contains(eid) || PENDING.containsKey(eid)) return;
+        PENDING.put(eid, new PendingPotion(potionEntity));
     }
 
-    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
-        Vec3d potionPos = potionEntity.getPos();
-        double closestDist = 20.0; // Larger range since potions travel
+    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity,
+                                              Vec3d potionPos, PotCounterConfig config) {
+        double closestDist = 20.0;
         PlayerEntity closest = null;
 
         for (PlayerEntity player : client.world.getPlayers()) {
@@ -197,7 +239,7 @@ public class PotCounterClient implements ClientModInitializer {
     public static void clearAll() {
         COUNTS.clear();
         ID_TO_UUID.clear();
-        COUNTED_POTIONS.clear();
-        PENDING_POTIONS.clear();
+        PROCESSED_POTIONS.clear();
+        PENDING.clear();
     }
 }
