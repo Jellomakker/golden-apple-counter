@@ -9,6 +9,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.projectile.thrown.PotionEntity;
@@ -32,13 +33,13 @@ public class PotCounterClient implements ClientModInitializer {
 
     private static final Map<UUID, Integer> COUNTS = new ConcurrentHashMap<>();
 
-    /** Entity network ID → UUID, populated each tick for the renderer mixin. */
+    /** Entity network ID -> UUID, populated each tick for the renderer mixin. */
     private static final Map<Integer, UUID> ID_TO_UUID = new ConcurrentHashMap<>();
 
     /**
-     * Entity IDs that have been fully processed so we never double-count.
-     * An entity is added here as soon as its item stack is non-empty,
-     * whether it was a health pot or not.
+     * Entity IDs definitively processed (counted or rejected).
+     * Only added here once the ItemStack is non-empty.
+     * If the stack is still empty we skip and retry next tick.
      */
     private static final Set<Integer> PROCESSED_POTIONS = ConcurrentHashMap.newKeySet();
 
@@ -73,64 +74,65 @@ public class PotCounterClient implements ClientModInitializer {
             }
         }
 
-        // Maintain entity-id → UUID map for renderer mixin
+        PotCounterConfig config = PotCounterConfig.get();
+
+        // Scan world each tick for PotionEntity instances.
+        // If the stack is empty the server data has not been synced yet -
+        // skip and retry next tick. Only mark processed once stack is non-empty.
+        for (Entity entity : client.world.getEntities()) {
+            if (!(entity instanceof PotionEntity pot)) continue;
+            int eid = pot.getId();
+            if (PROCESSED_POTIONS.contains(eid)) continue;
+
+            var stack = pot.getStack();
+            if (stack == null || stack.isEmpty()) continue; // retry next tick
+
+            PROCESSED_POTIONS.add(eid); // definitive answer available now
+            if (!config.enabled) continue;
+            if (!isInstantHealthTwo(pot)) continue;
+            attributePotionThrow(client, pot, config);
+        }
+
+        // Maintain entity-id -> UUID map for the renderer mixin
         Set<UUID> active = new HashSet<>();
         for (PlayerEntity player : client.world.getPlayers()) {
             UUID uuid = player.getUuid();
             active.add(uuid);
             ID_TO_UUID.put(player.getId(), uuid);
         }
-
         COUNTS.keySet().retainAll(active);
         ID_TO_UUID.values().retainAll(active);
     }
 
-    /**
-     * Called from ThrownItemEntityMixin when setItem() fires on a PotionEntity.
-     * setItem() is invoked by the data tracker when the server’s tracker update
-     * packet is processed – this is the exact moment item data becomes available.
-     */
-    public static void onPotionItemSet(PotionEntity potionEntity) {
-        // Guard against server-side calls (mixin fires on both sides)
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null) return;
-
-        int eid = potionEntity.getId();
-
-        // Skip if the stack is still empty (pre-sync default state)
-        var stack = potionEntity.getStack();
-        if (stack == null || stack.isEmpty()) return;
-
-        // Mark as processed to avoid double-counting from repeated setItem calls
-        if (!PROCESSED_POTIONS.add(eid)) return;
-
-        PotCounterConfig config = PotCounterConfig.get();
-        if (!config.enabled) return;
-
-        if (!isInstantHealthTwo(potionEntity)) return;
-
-        attributePotionThrow(client, potionEntity, config);
-    }
-
-    private static boolean isInstantHealthTwo(PotionEntity potionEntity) {
+    private static boolean isInstantHealthTwo(PotionEntity pot) {
         try {
-            PotionContentsComponent contents =
-                    potionEntity.getStack().get(DataComponentTypes.POTION_CONTENTS);
+            PotionContentsComponent contents = pot.getStack().get(DataComponentTypes.POTION_CONTENTS);
             if (contents == null) return false;
 
+            // Custom effects (uncommon for vanilla)
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
                     return true;
                 }
             }
+
+            // Base potion entry (strong_healing lives here)
+            if (contents.potion().isPresent()) {
+                for (var effect : contents.potion().get().value().getEffects()) {
+                    if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
+                            && effect.getAmplifier() >= 1) {
+                        return true;
+                    }
+                }
+            }
         } catch (Throwable ignored) {}
         return false;
     }
 
-    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity,
+    private static void attributePotionThrow(MinecraftClient client, PotionEntity pot,
                                               PotCounterConfig config) {
-        Vec3d potionPos = potionEntity.getPos();
+        Vec3d potionPos = pot.getPos();
         double closestDist = 20.0;
         PlayerEntity closest = null;
 
@@ -143,13 +145,11 @@ public class PotCounterClient implements ClientModInitializer {
         }
 
         if (closest == null) return;
-
         UUID uuid = closest.getUuid();
         if (!config.includeSelfDisplay && client.player != null
                 && uuid.equals(client.player.getUuid())) {
             return;
         }
-
         COUNTS.merge(uuid, 1, Integer::sum);
     }
 
