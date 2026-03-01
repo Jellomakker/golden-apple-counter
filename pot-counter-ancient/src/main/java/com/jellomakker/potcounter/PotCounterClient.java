@@ -33,6 +33,9 @@ public class PotCounterClient implements ClientModInitializer {
 
     private static final Map<UUID, Integer> COUNTS = new ConcurrentHashMap<>();
 
+    /** Entity network ID -> UUID, populated each tick for the renderer mixin. */
+    private static final Map<Integer, UUID> ID_TO_UUID = new ConcurrentHashMap<>();
+
     /**
      * Entity IDs definitively processed (counted or rejected).
      * Only added here once the ItemStack is non-empty.
@@ -55,6 +58,7 @@ public class PotCounterClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             COUNTS.clear();
+            ID_TO_UUID.clear();
             PROCESSED_POTIONS.clear();
         });
 
@@ -89,12 +93,15 @@ public class PotCounterClient implements ClientModInitializer {
             attributePotionThrow(client, pot, config);
         }
 
-        // Prune counts for players that have left
+        // Prune counts for players that have left; maintain entity-id -> UUID map
         Set<UUID> active = new HashSet<>();
         for (PlayerEntity player : client.world.getPlayers()) {
-            active.add(player.getUuid());
+            UUID uuid = player.getUuid();
+            active.add(uuid);
+            ID_TO_UUID.put(player.getId(), uuid);
         }
         COUNTS.keySet().retainAll(active);
+        ID_TO_UUID.values().retainAll(active);
     }
 
     private static boolean isInstantHealthTwo(PotionEntity pot) {
@@ -150,6 +157,10 @@ public class PotCounterClient implements ClientModInitializer {
         return COUNTS.getOrDefault(playerUuid, 0);
     }
 
+    public static UUID getUuidFromEntityId(int entityId) {
+        return ID_TO_UUID.get(entityId);
+    }
+
     public static Text buildCounterText(int count) {
         Text potIcon = Text.literal(POT_ICON)
                 .setStyle(Style.EMPTY.withFont(POT_FONT));
@@ -158,6 +169,7 @@ public class PotCounterClient implements ClientModInitializer {
 
     public static void clearAll() {
         COUNTS.clear();
+        ID_TO_UUID.clear();
         PROCESSED_POTIONS.clear();
     }
 }
