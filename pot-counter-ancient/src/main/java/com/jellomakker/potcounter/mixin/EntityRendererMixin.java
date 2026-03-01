@@ -38,7 +38,7 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
         if (!(state instanceof PlayerEntityRenderState playerState)) return;
 
         PotCounterConfig config = PotCounterConfig.get();
-        if (!config.enabled || !config.showOnPlayerName) return;
+        if (!config.enabled) return;
 
         UUID uuid = PotCounterClient.getUuidFromEntityId(playerState.id);
         if (uuid == null) return;

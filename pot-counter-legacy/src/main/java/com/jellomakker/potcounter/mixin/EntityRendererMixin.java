@@ -39,7 +39,7 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
         if (!(state instanceof PlayerEntityRenderState playerState)) return;
 
         PotCounterConfig config = PotCounterConfig.get();
-        if (!config.enabled || !config.showOnPlayerName) return;
+        if (!config.enabled) return;
 
         UUID uuid = PotCounterClient.getUuidFromEntityId(playerState.id);
         if (uuid == null) return;
@@ -60,12 +60,7 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
 
         matrices.push();
 
-        // Translate to position above the player
-        if (state.nameLabelPos != null) {
-            matrices.translate(state.nameLabelPos.x, yOffset, state.nameLabelPos.z);
-        } else {
-            matrices.translate(0.0, yOffset, 0.0);
-        }
+        matrices.translate(0.0, yOffset, 0.0);
 
         // Billboard: face the camera
         matrices.multiply(client.gameRenderer.getCamera().getRotation());

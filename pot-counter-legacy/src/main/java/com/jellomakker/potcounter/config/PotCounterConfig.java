@@ -2,7 +2,9 @@ package com.jellomakker.potcounter.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -36,12 +38,17 @@ public class PotCounterConfig {
 
         try {
             String json = Files.readString(CONFIG_PATH);
-            PotCounterConfig loaded = GSON.fromJson(json, PotCounterConfig.class);
-            if (loaded == null) {
-                loaded = new PotCounterConfig();
-            }
-            return loaded;
-        } catch (IOException | JsonParseException ignored) {
+            // Parse manually so missing fields keep their Java defaults (true),
+            // instead of GSON silently setting them to false.
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            PotCounterConfig config = new PotCounterConfig();
+            if (obj.has("enabled"))           config.enabled           = obj.get("enabled").getAsBoolean();
+            if (obj.has("showOnPlayerName"))  config.showOnPlayerName  = obj.get("showOnPlayerName").getAsBoolean();
+            if (obj.has("includeSelfDisplay"))config.includeSelfDisplay= obj.get("includeSelfDisplay").getAsBoolean();
+            if (obj.has("showBackground"))    config.showBackground    = obj.get("showBackground").getAsBoolean();
+            config.save(); // write back so any new fields appear in the file
+            return config;
+        } catch (IOException | JsonParseException | IllegalStateException ignored) {
             PotCounterConfig fallback = new PotCounterConfig();
             fallback.save();
             return fallback;
