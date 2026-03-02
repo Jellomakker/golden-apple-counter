@@ -3,8 +3,7 @@
   "package": "com.jellomakker.potcounter.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "EntityRendererMixin",
-    "ClientWorldMixin"
+    "EntityRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1

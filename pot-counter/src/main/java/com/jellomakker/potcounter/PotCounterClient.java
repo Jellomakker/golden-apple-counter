@@ -37,10 +37,7 @@ public class PotCounterClient implements ClientModInitializer {
     /** Entity network ID → UUID, populated each tick for the renderer mixin. */
     private static final Map<Integer, UUID> ID_TO_UUID = new ConcurrentHashMap<>();
 
-    /**
-     * Track potion entity IDs we have already counted so we don't
-     * double-count a potion that exists for multiple ticks.
-     */
+    /** Entity IDs already processed this session (counted or rejected). */
     private static final Set<Integer> COUNTED_POTIONS = ConcurrentHashMap.newKeySet();
 
     private static KeyBinding resetKeybind;
@@ -68,7 +65,6 @@ public class PotCounterClient implements ClientModInitializer {
     private void onTick(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Check reset keybind
         if (resetKeybind != null) {
             while (resetKeybind.wasPressed()) {
                 clearAll();
@@ -85,11 +81,28 @@ public class PotCounterClient implements ClientModInitializer {
             ID_TO_UUID.put(player.getId(), uuid);
         }
 
+        // Scan all entities for splash potions
+        if (config.enabled) {
+            for (Entity entity : client.world.getEntities()) {
+                if (!(entity instanceof PotionEntity potionEntity)) continue;
+                int entityId = potionEntity.getId();
+                if (!COUNTED_POTIONS.add(entityId)) continue;
+                if (!isInstantHealthTwo(potionEntity)) continue;
+                attributePotionThrow(client, potionEntity, config);
+            }
+        }
+
+        // Clean up COUNTED_POTIONS for entities that are gone/dead
+        COUNTED_POTIONS.removeIf(id -> {
+            Entity e = client.world.getEntityById(id);
+            return e == null || !e.isAlive();
+        });
+
         COUNTS.keySet().retainAll(active);
         ID_TO_UUID.values().retainAll(active);
     }
 
-    private static boolean isInstantHealthTwo(PotionEntity potionEntity) {
+    private boolean isInstantHealthTwo(PotionEntity potionEntity) {
         try {
             var stack = potionEntity.getStack();
             if (stack == null || stack.isEmpty()) return false;
@@ -97,8 +110,6 @@ public class PotCounterClient implements ClientModInitializer {
             PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
             if (contents == null) return false;
 
-            // Check if potion matches STRONG_HEALING (Instant Health II)
-            // The potion registry entry for "strong_healing" has Instant Health at amplifier 1
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
@@ -106,7 +117,6 @@ public class PotCounterClient implements ClientModInitializer {
                 }
             }
 
-            // Also check the base potion entry
             if (contents.potion().isPresent()) {
                 var potionEntry = contents.potion().get();
                 for (var effect : potionEntry.value().getEffects()) {
@@ -116,35 +126,13 @@ public class PotCounterClient implements ClientModInitializer {
                     }
                 }
             }
-        } catch (Throwable ignored) {
-            // Cross-version safety
-        }
+        } catch (Throwable ignored) {}
         return false;
     }
 
-    /**
-     * Called from ClientWorldMixin when a potion entity spawns in the client world.
-     * This is far more reliable than tick-scanning because splash potions only
-     * live for 1-3 ticks and can despawn between tick callbacks.
-     */
-    public static void onPotionSpawned(PotionEntity potionEntity) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null) return;
-
-        PotCounterConfig config = PotCounterConfig.get();
-        if (!config.enabled) return;
-
-        int entityId = potionEntity.getId();
-        if (!COUNTED_POTIONS.add(entityId)) return;
-
-        if (!isInstantHealthTwo(potionEntity)) return;
-
-        attributePotionThrow(client, potionEntity, config);
-    }
-
-    private static void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
+    private void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
         Vec3d potionPos = potionEntity.getSyncedPos();
-        double closestDist = 20.0; // Larger range since potions travel
+        double closestDist = 20.0;
         PlayerEntity closest = null;
 
         for (PlayerEntity player : client.world.getPlayers()) {
@@ -157,12 +145,10 @@ public class PotCounterClient implements ClientModInitializer {
 
         if (closest != null) {
             UUID uuid = closest.getUuid();
-
             if (!config.includeSelfDisplay && client.player != null
                     && uuid.equals(client.player.getUuid())) {
                 return;
             }
-
             COUNTS.merge(uuid, 1, Integer::sum);
         }
     }

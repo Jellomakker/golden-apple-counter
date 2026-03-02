@@ -9,8 +9,6 @@ import net.minecraft.client.render.entity.EntityRenderer;
 import net.minecraft.client.render.entity.state.EntityRenderState;
 import net.minecraft.client.render.entity.state.PlayerEntityRenderState;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.OrderedText;
 import net.minecraft.text.Text;
 import org.joml.Matrix4f;
@@ -42,10 +40,8 @@ public abstract class EntityRendererMixin<T, S extends EntityRenderState> {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null) return;
 
-        // Resolve entity by network ID — reliable since the entity is being rendered right now.
-        Entity entity = client.world.getEntityById(playerState.id);
-        if (!(entity instanceof PlayerEntity player)) return;
-        UUID uuid = player.getUuid();
+        UUID uuid = PotCounterClient.getUuidFromEntityId(playerState.id);
+        if (uuid == null) return;
 
         if (!config.includeSelfDisplay && client.player != null
                 && uuid.equals(client.player.getUuid())) {
