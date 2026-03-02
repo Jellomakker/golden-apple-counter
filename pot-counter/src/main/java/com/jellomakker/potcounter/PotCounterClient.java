@@ -110,6 +110,7 @@ public class PotCounterClient implements ClientModInitializer {
             PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
             if (contents == null) return false;
 
+            // Check custom effects first (amplifier >= 1 = Instant Health II)
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
@@ -117,13 +118,13 @@ public class PotCounterClient implements ClientModInitializer {
                 }
             }
 
+            // Check base potion by KEY rather than .value() to avoid registry binding issues
             if (contents.potion().isPresent()) {
-                var potionEntry = contents.potion().get();
-                for (var effect : potionEntry.value().getEffects()) {
-                    if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
-                            && effect.getAmplifier() >= 1) {
-                        return true;
-                    }
+                var keyOpt = contents.potion().get().getKey();
+                if (keyOpt.isPresent()) {
+                    String path = keyOpt.get().getValue().getPath();
+                    // "strong_healing" = Instant Health II splash potion
+                    return "strong_healing".equals(path);
                 }
             }
         } catch (Throwable ignored) {}

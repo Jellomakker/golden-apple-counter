@@ -85,15 +85,18 @@ public class PotCounterClient implements ClientModInitializer {
             for (Entity entity : client.world.getEntities()) {
                 if (!(entity instanceof PotionEntity potionEntity)) continue;
                 int entityId = potionEntity.getId();
-                if (COUNTED_POTIONS.contains(entityId)) continue; // already fully processed
+                if (COUNTED_POTIONS.contains(entityId)) continue;
 
-                // In these versions, item stack data may not be synced yet on the first tick.
-                // Don't mark as processed until we have the actual item data.
                 var stack = potionEntity.getStack();
-                if (stack == null || stack.isEmpty()) continue; // retry next tick
+                if (stack == null || stack.isEmpty()) {
+                    LOGGER.info("[PotCounter] potion #{} stack empty, retrying next tick", entityId);
+                    continue;
+                }
 
-                COUNTED_POTIONS.add(entityId); // data available, mark as processed
-                if (!isInstantHealthTwo(potionEntity)) continue;
+                COUNTED_POTIONS.add(entityId);
+                boolean matched = isInstantHealthTwo(potionEntity);
+                LOGGER.info("[PotCounter] potion #{} stack={} isInstantHealthII={}", entityId, stack, matched);
+                if (!matched) continue;
                 attributePotionThrow(client, potionEntity, config);
             }
         }
@@ -116,6 +119,7 @@ public class PotCounterClient implements ClientModInitializer {
             PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
             if (contents == null) return false;
 
+            // Check custom effects first (amplifier >= 1 = Instant Health II)
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
@@ -123,16 +127,19 @@ public class PotCounterClient implements ClientModInitializer {
                 }
             }
 
+            // Check base potion by KEY rather than .value() — avoids IllegalStateException
+            // when the Potion registry (data-driven in 1.21.4+) isn't fully bound.
             if (contents.potion().isPresent()) {
-                var potionEntry = contents.potion().get();
-                for (var effect : potionEntry.value().getEffects()) {
-                    if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
-                            && effect.getAmplifier() >= 1) {
-                        return true;
-                    }
+                var keyOpt = contents.potion().get().getKey();
+                if (keyOpt.isPresent()) {
+                    String path = keyOpt.get().getValue().getPath();
+                    // "strong_healing" = Instant Health II splash potion
+                    return "strong_healing".equals(path);
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            LOGGER.error("[PotCounter] isInstantHealthTwo error: {}", t.toString());
+        }
         return false;
     }
 
