@@ -85,7 +85,14 @@ public class PotCounterClient implements ClientModInitializer {
             for (Entity entity : client.world.getEntities()) {
                 if (!(entity instanceof PotionEntity potionEntity)) continue;
                 int entityId = potionEntity.getId();
-                if (!COUNTED_POTIONS.add(entityId)) continue;
+                if (COUNTED_POTIONS.contains(entityId)) continue; // already fully processed
+
+                // In these versions, item stack data may not be synced yet on the first tick.
+                // Don't mark as processed until we have the actual item data.
+                var stack = potionEntity.getStack();
+                if (stack == null || stack.isEmpty()) continue; // retry next tick
+
+                COUNTED_POTIONS.add(entityId); // data available, mark as processed
                 if (!isInstantHealthTwo(potionEntity)) continue;
                 attributePotionThrow(client, potionEntity, config);
             }
