@@ -58,7 +58,7 @@ public class PotCounterClient implements ClientModInitializer {
             COUNTED_POTIONS.clear();
         });
 
-        LOGGER.info("[PotCounter] Initialized (rendering via EntityRendererMixin)");
+        LOGGER.info("[PotCounter] Initialized (legacy, 1.21.5-1.21.10)");
     }
 
     private void onTick(MinecraftClient client) {
@@ -80,28 +80,18 @@ public class PotCounterClient implements ClientModInitializer {
             ID_TO_UUID.put(player.getId(), uuid);
         }
 
-        // Scan all entities for splash potions
+        // Scan all entities for splash potions — same pattern as working 1.21.11 version.
         if (config.enabled) {
             for (Entity entity : client.world.getEntities()) {
                 if (!(entity instanceof PotionEntity potionEntity)) continue;
                 int entityId = potionEntity.getId();
-                if (COUNTED_POTIONS.contains(entityId)) continue;
-
-                var stack = potionEntity.getStack();
-                if (stack == null || stack.isEmpty()) {
-                    LOGGER.info("[PotCounter] potion #{} stack empty, retrying next tick", entityId);
-                    continue;
-                }
-
-                COUNTED_POTIONS.add(entityId);
-                boolean matched = isInstantHealthTwo(potionEntity);
-                LOGGER.info("[PotCounter] potion #{} stack={} isInstantHealthII={}", entityId, stack, matched);
-                if (!matched) continue;
+                if (!COUNTED_POTIONS.add(entityId)) continue;
+                if (!isInstantHealthTwo(potionEntity)) continue;
                 attributePotionThrow(client, potionEntity, config);
             }
         }
 
-        // Clean up COUNTED_POTIONS for entities that are gone
+        // Clean up COUNTED_POTIONS for entities that are gone/dead
         COUNTED_POTIONS.removeIf(id -> {
             Entity e = client.world.getEntityById(id);
             return e == null || !e.isAlive();
@@ -128,7 +118,7 @@ public class PotCounterClient implements ClientModInitializer {
             }
 
             // Check base potion by KEY rather than .value() — avoids IllegalStateException
-            // when the Potion registry (data-driven in 1.21.4+) isn't fully bound.
+            // in data-driven potion registry (1.21.4+).
             if (contents.potion().isPresent()) {
                 var keyOpt = contents.potion().get().getKey();
                 if (keyOpt.isPresent()) {
