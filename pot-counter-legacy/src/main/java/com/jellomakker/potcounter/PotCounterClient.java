@@ -36,12 +36,8 @@ public class PotCounterClient implements ClientModInitializer {
     /** Entity network ID -> UUID, populated each tick for the renderer mixin. */
     private static final Map<Integer, UUID> ID_TO_UUID = new ConcurrentHashMap<>();
 
-    /**
-     * Entity IDs definitively processed (counted or rejected).
-     * Only added here once the ItemStack is non-empty.
-     * If the stack is still empty we skip and retry next tick.
-     */
-    private static final Set<Integer> PROCESSED_POTIONS = ConcurrentHashMap.newKeySet();
+    /** Entity IDs already processed this session (counted or rejected). */
+    private static final Set<Integer> COUNTED_POTIONS = ConcurrentHashMap.newKeySet();
 
     private static KeyBinding resetKeybind;
 
@@ -59,7 +55,7 @@ public class PotCounterClient implements ClientModInitializer {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             COUNTS.clear();
             ID_TO_UUID.clear();
-            PROCESSED_POTIONS.clear();
+            COUNTED_POTIONS.clear();
         });
 
         LOGGER.info("[PotCounter] Initialized (rendering via EntityRendererMixin)");
@@ -76,40 +72,43 @@ public class PotCounterClient implements ClientModInitializer {
 
         PotCounterConfig config = PotCounterConfig.get();
 
-        // Scan world each tick for PotionEntity instances.
-        // If the stack is empty the server data has not been synced yet -
-        // skip and retry next tick. Only mark processed once stack is non-empty.
-        for (Entity entity : client.world.getEntities()) {
-            if (!(entity instanceof PotionEntity pot)) continue;
-            int eid = pot.getId();
-            if (PROCESSED_POTIONS.contains(eid)) continue;
-
-            var stack = pot.getStack();
-            if (stack == null || stack.isEmpty()) continue; // retry next tick
-
-            PROCESSED_POTIONS.add(eid); // definitive answer available now
-            if (!config.enabled) continue;
-            if (!isInstantHealthTwo(pot)) continue;
-            attributePotionThrow(client, pot, config);
-        }
-
-        // Maintain entity-id -> UUID map for the renderer mixin
+        // Maintain entity-id -> UUID map for renderer mixin
         Set<UUID> active = new HashSet<>();
         for (PlayerEntity player : client.world.getPlayers()) {
             UUID uuid = player.getUuid();
             active.add(uuid);
             ID_TO_UUID.put(player.getId(), uuid);
         }
+
+        // Scan all entities for splash potions
+        if (config.enabled) {
+            for (Entity entity : client.world.getEntities()) {
+                if (!(entity instanceof PotionEntity potionEntity)) continue;
+                int entityId = potionEntity.getId();
+                if (!COUNTED_POTIONS.add(entityId)) continue;
+                if (!isInstantHealthTwo(potionEntity)) continue;
+                attributePotionThrow(client, potionEntity, config);
+            }
+        }
+
+        // Clean up COUNTED_POTIONS for entities that are gone
+        COUNTED_POTIONS.removeIf(id -> {
+            Entity e = client.world.getEntityById(id);
+            return e == null || !e.isAlive();
+        });
+
         COUNTS.keySet().retainAll(active);
         ID_TO_UUID.values().retainAll(active);
     }
 
-    private static boolean isInstantHealthTwo(PotionEntity pot) {
+    private boolean isInstantHealthTwo(PotionEntity potionEntity) {
         try {
-            PotionContentsComponent contents = pot.getStack().get(DataComponentTypes.POTION_CONTENTS);
+            var stack = potionEntity.getStack();
+            if (stack == null || stack.isEmpty()) return false;
+
+            PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
             if (contents == null) return false;
 
-            // Custom effects (uncommon for vanilla)
             for (var effect : contents.getEffects()) {
                 if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                         && effect.getAmplifier() >= 1) {
@@ -117,22 +116,21 @@ public class PotCounterClient implements ClientModInitializer {
                 }
             }
 
-            // Base potion entry (strong_healing lives here)
             if (contents.potion().isPresent()) {
-                for (var effect : contents.potion().get().value().getEffects()) {
+                var potionEntry = contents.potion().get();
+                for (var effect : potionEntry.value().getEffects()) {
                     if (effect.getEffectType().value() == StatusEffects.INSTANT_HEALTH.value()
                             && effect.getAmplifier() >= 1) {
                         return true;
                     }
                 }
             }
-        } catch (Throwable t) { LOGGER.error("[PotCounter] detection error: {}", t.toString()); }
+        } catch (Throwable ignored) {}
         return false;
     }
 
-    private static void attributePotionThrow(MinecraftClient client, PotionEntity pot,
-                                              PotCounterConfig config) {
-        Vec3d potionPos = pot.getPos();
+    private void attributePotionThrow(MinecraftClient client, PotionEntity potionEntity, PotCounterConfig config) {
+        Vec3d potionPos = potionEntity.getPos();
         double closestDist = 20.0;
         PlayerEntity closest = null;
 
@@ -144,24 +142,26 @@ public class PotCounterClient implements ClientModInitializer {
             }
         }
 
-        if (closest == null) return;
-        UUID uuid = closest.getUuid();
-        if (!config.includeSelfDisplay && client.player != null
-                && uuid.equals(client.player.getUuid())) {
-            return;
+        if (closest != null) {
+            UUID uuid = closest.getUuid();
+            if (!config.includeSelfDisplay && client.player != null
+                    && uuid.equals(client.player.getUuid())) {
+                return;
+            }
+            COUNTS.merge(uuid, 1, Integer::sum);
         }
-        LOGGER.info("[PotCounter] pot attributed to {}", uuid);
-        COUNTS.merge(uuid, 1, Integer::sum);
     }
 
     public static int getCount(UUID playerUuid) {
         return COUNTS.getOrDefault(playerUuid, 0);
     }
 
+    /** Look up UUID from an entity network id. */
     public static UUID getUuidFromEntityId(int entityId) {
         return ID_TO_UUID.get(entityId);
     }
 
+    /** Build the counter text with a potion icon from our custom font. */
     public static Text buildCounterText(int count) {
         Text potIcon = Text.literal(POT_ICON)
                 .setStyle(Style.EMPTY.withFont(POT_FONT));
@@ -171,6 +171,6 @@ public class PotCounterClient implements ClientModInitializer {
     public static void clearAll() {
         COUNTS.clear();
         ID_TO_UUID.clear();
-        PROCESSED_POTIONS.clear();
+        COUNTED_POTIONS.clear();
     }
 }
